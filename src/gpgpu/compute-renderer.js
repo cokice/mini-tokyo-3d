@@ -159,12 +159,69 @@ export default class {
         this.dtObject.setTracked(id);
     }
 
-    getInstanceIDs(context) {
-        const me = this,
-            texture = me.dataVariable[me.currentTextureIndex],
-            buffer = me.buffer;
+    // Instance positions are read back through a pixel buffer object and a fence
+    // instead of readRenderTargetPixels(), which blocks until the GPU has
+    // finished every queued command and stalled the frame each time a vehicle
+    // was added, updated or removed. requestInstanceIDs() queues the copy
+    // right after compute(), and pollInstanceIDs() picks the result up on a
+    // later frame once the GPU has signaled the fence. Returns false if a
+    // readback is already in flight.
+    requestInstanceIDs(context) {
+        const me = this;
 
-        context.renderer.readRenderTargetPixels(texture, 0, 0, texture.width, texture.height, buffer);
+        if (me.readbackSync) {
+            return false;
+        }
+
+        const renderer = context.renderer,
+            gl = renderer.getContext(),
+            texture = me.dataVariable[me.currentTextureIndex];
+
+        if (!me.readbackBuffer) {
+            me.readbackBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.PIXEL_PACK_BUFFER, me.readbackBuffer);
+            gl.bufferData(gl.PIXEL_PACK_BUFFER, me.buffer.byteLength, gl.STREAM_READ);
+        }
+
+        const currentRenderTarget = renderer.getRenderTarget();
+
+        renderer.resetState();
+
+        renderer.setRenderTarget(texture);
+        gl.readBuffer(gl.COLOR_ATTACHMENT0);
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, me.readbackBuffer);
+        gl.readPixels(0, 0, texture.width, texture.height, gl.RGBA, gl.FLOAT, 0);
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+        renderer.setRenderTarget(currentRenderTarget);
+
+        renderer.resetState();
+
+        me.readbackSync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+        return true;
+    }
+
+    // Returns the instance IDs once the readback queued by requestInstanceIDs()
+    // has completed, or undefined if there is none or it is still in progress.
+    pollInstanceIDs(context) {
+        const me = this,
+            {readbackSync: sync, buffer} = me;
+
+        if (!sync) {
+            return;
+        }
+
+        const gl = context.renderer.getContext();
+
+        if (gl.getSyncParameter(sync, gl.SYNC_STATUS) !== gl.SIGNALED) {
+            return;
+        }
+        gl.deleteSync(sync);
+        delete me.readbackSync;
+
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, me.readbackBuffer);
+        gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, buffer);
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+
         return me.dtObject.getIDs(buffer);
     }
 
@@ -272,8 +329,14 @@ export default class {
         this.uniforms.timeOffset.value = timeOffset;
     }
 
-    dispose() {
-        const me = this;
+    dispose(context) {
+        const me = this,
+            gl = context.renderer.getContext();
+
+        gl.deleteSync(me.readbackSync || null);
+        gl.deleteBuffer(me.readbackBuffer || null);
+        delete me.readbackSync;
+        delete me.readbackBuffer;
 
         me.dtObject.dispose();
         me.dtRoute.dispose();

@@ -94,7 +94,7 @@ export default class {
         map.on('pitch', me.onCameraChanged);
     }
 
-    onRemove(map) {
+    onRemove(map, context) {
         const me = this,
             glowPipeline = me.glowPipeline;
 
@@ -104,7 +104,7 @@ export default class {
         glowPipeline.remove(me.busMeshSet.getOutlineMesh());
         glowPipeline.dispose();
 
-        me.computeRenderer.dispose();
+        me.computeRenderer.dispose(context);
 
         me.ugCarMeshSet.dispose();
         me.ogCarMeshSet.dispose();
@@ -121,21 +121,32 @@ export default class {
 
     prerender(map, context) {
         const me = this,
-            textures = me.computeRenderer.compute(context, map.layerZoom);
+            computeRenderer = me.computeRenderer,
+            textures = computeRenderer.compute(context, map.layerZoom);
 
         me.ugCarMeshSet.setTextures(textures);
         me.ogCarMeshSet.setTextures(textures);
         me.aircraftMeshSet.setTextures(textures);
         me.busMeshSet.setTextures(textures);
 
-        if (me.needsUpdateInstances) {
-            // Reassign object instances into mesh sets based on type and altitude
-            const [ugCarInstanceIDs, ogCarInstanceIDs, aircraftInstanceIDs, busInstanceIDs] = me.computeRenderer.getInstanceIDs(context);
+        // Reassign object instances into mesh sets based on type and altitude.
+        // The altitudes come from an asynchronous GPU readback (see
+        // ComputeRenderer.requestInstanceIDs()), so the assignment lags the
+        // request by a frame or so - well within the fade-in/out animations.
+        const instanceIDs = computeRenderer.pollInstanceIDs(context);
+
+        if (instanceIDs) {
+            const [ugCarInstanceIDs, ogCarInstanceIDs, aircraftInstanceIDs, busInstanceIDs] = instanceIDs;
 
             me.ugCarMeshSet.setInstanceIDs(ugCarInstanceIDs);
             me.ogCarMeshSet.setInstanceIDs(ogCarInstanceIDs);
             me.aircraftMeshSet.setInstanceIDs(aircraftInstanceIDs);
             me.busMeshSet.setInstanceIDs(busInstanceIDs);
+        }
+
+        // Requests made while a readback is in flight are kept pending and
+        // issued as soon as it completes.
+        if (me.needsUpdateInstances && computeRenderer.requestInstanceIDs(context)) {
             delete me.needsUpdateInstances;
         }
     }
@@ -152,13 +163,13 @@ export default class {
         // meshes it draws sample GPU-compute textures (vehicle positions) that
         // only have valid data in the renderer that computed them via
         // prerender() above, which is this one. Skipped while nothing is
-        // marked/tracked - except for one extra frame right after the last
-        // object is cleared, so the mask/blur textures actually go blank
-        // instead of freezing on the last-drawn glow.
-        if (glowActive || me._glowWasActive) {
+        // marked/tracked, in which case the pipeline also stops handing out its
+        // (stale) textures so GlowCompositeLayer skips its full-screen pass.
+        if (glowActive) {
             me.glowPipeline.renderMaskAndBlur(renderer, camera);
+        } else {
+            me.glowPipeline.deactivate();
         }
-        me._glowWasActive = glowActive;
 
         renderer.resetState();
     }

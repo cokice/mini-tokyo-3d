@@ -2,6 +2,33 @@ import animation from '../animation';
 import configs from '../configs';
 import LinearDataTexture from './linear-data-texture';
 
+// Beyond this many separate ranges in a frame (e.g. hundreds of vehicles
+// added at once), a single full upload is cheaper than one texSubImage2D
+// call per range.
+const MAX_UPDATE_RANGES = 64;
+
+// Marks a range of the texture's data array for upload so that only the
+// modified texels are sent to the GPU instead of the whole texture. Ranges
+// must be texel-aligned (three.js rounds the start down and the length up
+// separately), so callers always pass an instance's whole 8-element block.
+function addUpdateRange(texture, start, count) {
+    const {updateRanges, userData} = texture;
+
+    if (!userData.fullUpdate) {
+        if (updateRanges.length < MAX_UPDATE_RANGES) {
+            texture.addUpdateRange(start, count);
+        } else {
+            texture.clearUpdateRanges();
+            userData.fullUpdate = true;
+        }
+    }
+    texture.needsUpdate = true;
+}
+
+function onTextureUpdate(texture) {
+    delete texture.userData.fullUpdate;
+}
+
 export default class {
 
     constructor(count, parameters) {
@@ -10,6 +37,7 @@ export default class {
 
         me.uintTexture = new LinearDataTexture(count * 2, 'uint4', chunkSize);
         me.floatTexture = new LinearDataTexture(count * 2, 'float4', chunkSize);
+        me.uintTexture.onUpdate = me.floatTexture.onUpdate = onTextureUpdate;
         me.count = count;
         me.start = 0;
     }
@@ -39,8 +67,8 @@ export default class {
                     sectionIndex,
                     nextSectionIndex
                 ], offset);
-                uintTexture.needsUpdate = true;
-                floatTexture.needsUpdate = true;
+                addUpdateRange(uintTexture, offset, 8);
+                addUpdateRange(floatTexture, offset, 8);
                 me.start = i + 1;
                 return i;
             }
@@ -67,8 +95,8 @@ export default class {
             decelerationTime,
             normalizedDeceleration
         ], offset);
-        uintTexture.needsUpdate = true;
-        floatTexture.needsUpdate = true;
+        addUpdateRange(uintTexture, offset, 8);
+        addUpdateRange(floatTexture, offset, 8);
     }
 
     remove(instanceID) {
@@ -79,12 +107,12 @@ export default class {
                 offset = instanceID * 8;
 
             uintArray.set([performance.now(), 2], offset + 5);
-            uintTexture.needsUpdate = true;
+            addUpdateRange(uintTexture, offset, 8);
 
             animation.start({
                 complete: () => {
                     uintArray.set([0, 0], offset + 6);
-                    uintTexture.needsUpdate = true;
+                    addUpdateRange(uintTexture, offset, 8);
                     me.start = Math.min(instanceID, me.start);
                     resolve();
                 },

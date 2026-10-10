@@ -71,6 +71,7 @@ export default class GlowPipeline {
             {glowScene, glowRenderTarget, blurRenderTargetA, blurRenderTargetB, quadScene, quadMesh, blurMaterial} = me;
 
         me.lastRenderer = renderer;
+        me.active = true;
         me._resize(renderer);
 
         renderer.setClearColor(0x000000, 0);
@@ -105,10 +106,16 @@ export default class GlowPipeline {
         renderer.setRenderTarget(null);
     }
 
+    // Called instead of renderMaskAndBlur() on frames with nothing to glow, so
+    // getGlowTextures() returns nothing and the composite pass is skipped.
+    deactivate() {
+        this.active = false;
+    }
+
     getGlowTextures() {
         const me = this;
 
-        if (!me.lastRenderer) {
+        if (!me.active) {
             return;
         }
         return {
